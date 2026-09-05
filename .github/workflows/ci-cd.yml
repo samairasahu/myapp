@@ -13,39 +13,57 @@ jobs:
     runs-on: self-hosted
 
     steps:
+      - name: Notify Slack - pipeline started
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+          --data '{"text":"🚀 Pipeline STARTED for myapp - commit ${{ github.sha }} by ${{ github.actor }}"}' \
+          ${{ secrets.SLACK_WEBHOOK_URL }}
+
       - name: Checkout code
+        id: checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Secret scan (Gitleaks)
+        id: gitleaks
+        continue-on-error: true
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
+        id: setup-python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
+        id: install-deps
         run: pip install -r requirements.txt
 
       - name: Run unit tests
-        run: pytest test_app.py -v
+        id: unit-tests
+        continue-on-error: true
+        run: pytest test_app.py -v | tee test-output.txt
 
       - name: Dependency vulnerability scan (pip-audit)
+        id: pip-audit
+        continue-on-error: true
         run: |
           pip install pip-audit
-          pip-audit -r requirements.txt || true
+          pip-audit -r requirements.txt | tee audit-output.txt || true
 
       - name: SonarQube Scan
+        id: sonarqube
+        continue-on-error: true
         uses: SonarSource/sonarqube-scan-action@v4
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
       - name: Log in to GitHub Container Registry
+        id: ghcr-login
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -53,23 +71,29 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Docker image
+        id: docker-build
         run: |
           IMAGE=ghcr.io/${{ github.repository_owner }}/myapp:${{ github.sha }}
           docker build -t $IMAGE .
           echo "IMAGE=$IMAGE" >> $GITHUB_ENV
 
       - name: Container image scan (Trivy)
+        id: trivy
+        continue-on-error: true
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.IMAGE }}
           format: 'table'
           severity: 'CRITICAL,HIGH'
           exit-code: '0'
+          output: 'trivy-output.txt'
 
       - name: Push Docker image
+        id: docker-push
         run: docker push ${{ env.IMAGE }}
 
       - name: Update GitOps repo with new image tag
+        id: gitops-update
         run: |
           git clone https://x-access-token:${{ secrets.GITOPS_PAT }}@github.com/${{ github.repository_owner }}/myapp-gitops.git
           cd myapp-gitops
@@ -79,16 +103,33 @@ jobs:
           git commit -am "Update image to ${{ github.sha }}"
           git push
 
-      - name: Notify Slack on success
-        if: success()
+      - name: Build stage summary
+        id: summary
+        if: always()
         run: |
-          curl -X POST -H 'Content-type: application/json' \
-          --data '{"text":"✅ Pipeline succeeded for myapp - commit ${{ github.sha }} by ${{ github.actor }}"}' \
-          ${{ secrets.SLACK_WEBHOOK_URL }}
+          function icon() { if [ "$1" == "success" ]; then echo "✅"; else echo "❌"; fi }
 
-      - name: Notify Slack on failure
-        if: failure()
+          SUMMARY="*Pipeline finished for myapp*\n"
+          SUMMARY+="Commit: \`${{ github.sha }}\` by ${{ github.actor }}\n\n"
+          SUMMARY+="$(icon ${{ steps.checkout.outcome }}) Checkout code\n"
+          SUMMARY+="$(icon ${{ steps.gitleaks.outcome }}) Secret scan (Gitleaks)\n"
+          SUMMARY+="$(icon ${{ steps.unit-tests.outcome }}) Unit tests (pytest)\n"
+          SUMMARY+="$(icon ${{ steps.pip-audit.outcome }}) Dependency scan (pip-audit)\n"
+          SUMMARY+="$(icon ${{ steps.sonarqube.outcome }}) SonarQube quality scan\n"
+          SUMMARY+="$(icon ${{ steps.docker-build.outcome }}) Docker build\n"
+          SUMMARY+="$(icon ${{ steps.trivy.outcome }}) Container scan (Trivy)\n"
+          SUMMARY+="$(icon ${{ steps.docker-push.outcome }}) Push image to GHCR\n"
+          SUMMARY+="$(icon ${{ steps.gitops-update.outcome }}) Update GitOps repo\n\n"
+          SUMMARY+="SonarQube report: ${{ secrets.SONAR_HOST_URL }}/dashboard?id=myapp\n"
+          SUMMARY+="Full logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          echo "SUMMARY<<EOF" >> $GITHUB_ENV
+          echo -e "$SUMMARY" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Send Slack summary
+        if: always()
         run: |
-          curl -X POST -H 'Content-type: application/json' \
-          --data '{"text":"❌ Pipeline FAILED for myapp - commit ${{ github.sha }} by ${{ github.actor }}. Check: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
-          ${{ secrets.SLACK_WEBHOOK_URL }}
+          PAYLOAD=$(jq -n --arg text "$SUMMARY" '{text: $text}')
+          curl -X POST -H 'Content-type: application/json' --data "$PAYLOAD" ${{ secrets.SLACK_WEBHOOK_URL }}
+

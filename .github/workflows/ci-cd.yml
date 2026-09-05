@@ -18,6 +18,27 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Secret scan (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest test_app.py -v
+
+      - name: Dependency vulnerability scan (pip-audit)
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt || true
+
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@v4
         env:
@@ -31,11 +52,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
+      - name: Build Docker image
         run: |
           IMAGE=ghcr.io/${{ github.repository_owner }}/myapp:${{ github.sha }}
           docker build -t $IMAGE .
-          docker push $IMAGE
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      - name: Container image scan (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Push Docker image
+        run: docker push ${{ env.IMAGE }}
 
       - name: Update GitOps repo with new image tag
         run: |

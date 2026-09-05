@@ -78,3 +78,17 @@ jobs:
           git config user.name "GitHub Actions"
           git commit -am "Update image to ${{ github.sha }}"
           git push
+
+      - name: Notify Slack on success
+        if: success()
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+          --data '{"text":"✅ Pipeline succeeded for myapp - commit ${{ github.sha }} by ${{ github.actor }}"}' \
+          ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify Slack on failure
+        if: failure()
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+          --data '{"text":"❌ Pipeline FAILED for myapp - commit ${{ github.sha }} by ${{ github.actor }}. Check: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+          ${{ secrets.SLACK_WEBHOOK_URL }}
